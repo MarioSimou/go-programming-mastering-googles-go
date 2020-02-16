@@ -13,8 +13,7 @@ import (
 	"./poetry"
 )
 
-var mutex sync.Mutex
-var protectedCache = cache{m: &mutex, c: make(map[string]poetry.Poetry)}
+var protectedCache = cache{c: make(map[string]poetry.Poetry)}
 
 type config struct {
 	Port  int    `json:"port"`
@@ -22,7 +21,7 @@ type config struct {
 }
 
 type cache struct {
-	m *sync.Mutex
+	sync.Mutex
 	e error
 	c map[string]poetry.Poetry
 }
@@ -86,9 +85,9 @@ func main() {
 		wg.Add(1)
 		go func(fileName string, wg *sync.WaitGroup) {
 			var p, _ = poetry.LoadPoem(fmt.Sprintf("public/%s", fileName))
-			protectedCache.m.Lock()
+			protectedCache.Lock()
 			protectedCache.c[fileName] = p
-			protectedCache.m.Unlock()
+			protectedCache.Unlock()
 
 			wg.Done()
 		}(fd.Name(), &wg)
