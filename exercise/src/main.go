@@ -8,22 +8,16 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
+	"strings"
 
 	"./poetry"
 )
 
-var protectedCache = cache{c: make(map[string]poetry.Poetry)}
+var cache = make(map[string]poetry.Poetry)
 
 type config struct {
 	Port  int    `json:"port"`
 	Route string `json:"route"`
-}
-
-type cache struct {
-	sync.Mutex
-	e error
-	c map[string]poetry.Poetry
 }
 
 func poemsRoute(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +28,7 @@ func poemsRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, ok := protectedCache.c[filename]
+	f, ok := cache[filename]
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprintf(w, "Error: File %q not found\n", filename)
@@ -64,35 +58,68 @@ func loadConfig() (config, error) {
 	return c, nil
 }
 
+type customPoem struct {
+	name string
+	p    poetry.Poetry
+	e    error
+}
+
+func worker(filePathChan chan string, poemChan chan customPoem, i int) {
+	filePath := <-filePathChan
+	p, e := poetry.LoadPoem(filePath)
+	var fileName = strings.ReplaceAll(filePath, "public/", "")
+	poemChan <- customPoem{fileName, p, e}
+}
+
+func loadBalancer(filePath string, filePathChan chan string) {
+	filePathChan <- filePath
+}
+
+func loadFiles() {
+	rd, e := ioutil.ReadDir("public")
+	if e != nil {
+		log.Fatalf("Error: %s\n", e)
+	}
+
+	var nRd = len(rd)
+	var filePathChan = make(chan string)
+	var peomChan = make(chan customPoem)
+	for i := 0; i < nRd; i++ {
+		go worker(filePathChan, peomChan, i)
+	}
+
+	var nExpectedFiles = 0
+	for _, df := range rd {
+		if df.IsDir() {
+			continue
+		}
+
+		nExpectedFiles += 1
+		var fileName = df.Name()
+		go loadBalancer(fmt.Sprintf("public/%s", fileName), filePathChan)
+	}
+
+	for i := 0; i < nExpectedFiles; i++ {
+		select {
+		case p := <-peomChan:
+			if p.e != nil {
+				log.Fatalf("Error: %s", p.e)
+			}
+			cache[p.name] = p.p
+		}
+	}
+}
+
+func init() {
+	loadFiles()
+}
+
 func main() {
 	var c config
 	var e error
 	if c, e = loadConfig(); e != nil {
 		log.Fatalf("Error: %s\n", e)
 	}
-
-	rd, e := ioutil.ReadDir("public")
-	if e != nil {
-		log.Fatalf("Error: %s\n", e)
-	}
-
-	var wg sync.WaitGroup
-	for _, fd := range rd {
-		if fd.IsDir() {
-			continue
-		}
-
-		wg.Add(1)
-		go func(fileName string, wg *sync.WaitGroup) {
-			var p, _ = poetry.LoadPoem(fmt.Sprintf("public/%s", fileName))
-			protectedCache.Lock()
-			protectedCache.c[fileName] = p
-			protectedCache.Unlock()
-
-			wg.Done()
-		}(fd.Name(), &wg)
-	}
-	wg.Wait()
 
 	http.HandleFunc(c.Route, poemsRoute)
 
